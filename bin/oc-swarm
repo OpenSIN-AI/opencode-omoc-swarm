@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: oc-swarm [--dir <projectRoot>] [--id <swarmId>] [--port <port>] [--tmux <tmuxSessionName>] [--opencode <cmd>]
+
+Starts:
+  - one shared OpenCode server (headless)
+  - 4 side-by-side panes (planner/researcher/coder/reviewer), each attached to its own session
+
+Defaults:
+  --dir       current working directory
+  --port      4096 (auto-increments if busy)
+  --tmux      "omoc-<swarmId>"
+  --opencode  "opencode"
+
+Environment:
+  OMOC_DIR            Default projectRoot
+  OMOC_SWARM_ID       Default swarm id prefix (titles: "<id>:<member>")
+  OMOC_PORT           Preferred port
+  OMOC_TMUX_SESSION   tmux session name
+  OPENCODE_BIN        opencode binary (alias for --opencode)
+USAGE
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+TARGET_DIR="${OMOC_DIR:-$(pwd)}"
+SWARM_ID="${OMOC_SWARM_ID:-}"
+PORT="${OMOC_PORT:-}"
+TMUX_SESSION="${OMOC_TMUX_SESSION:-}"
+OPENCODE_BIN="${OPENCODE_BIN:-opencode}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir)
+      TARGET_DIR="${2:-}"
+      shift 2
+      ;;
+    --id)
+      SWARM_ID="${2:-}"
+      shift 2
+      ;;
+    --port)
+      PORT="${2:-}"
+      shift 2
+      ;;
+    --tmux)
+      TMUX_SESSION="${2:-}"
+      shift 2
+      ;;
+    --opencode)
+      OPENCODE_BIN="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "Error: unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v tmux >/dev/null 2>&1 || { echo "Error: tmux not found" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "Error: curl not found" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "Error: jq not found" >&2; exit 1; }
+command -v lsof >/dev/null 2>&1 || { echo "Error: lsof not found" >&2; exit 1; }
+command -v "${OPENCODE_BIN}" >/dev/null 2>&1 || { echo "Error: ${OPENCODE_BIN} not found" >&2; exit 1; }
+
+PROJECT_ROOT="$(cd "${TARGET_DIR}" && pwd)"
+
+# If you want swarm tools inside the panes, install the plugin into the target project.
+if [ ! -f "${PROJECT_ROOT}/.opencode/plugins/omoc-swarm.ts" ]; then
+  cat >&2 <<EOF
+Warning: OMOC Swarm plugin not found at:
+  ${PROJECT_ROOT}/.opencode/plugins/omoc-swarm.ts
+
+Install it (example):
+  mkdir -p "${PROJECT_ROOT}/.opencode/plugins"
+  cp /path/to/opencode-omoc-swarm/plugins/omoc-swarm.ts "${PROJECT_ROOT}/.opencode/plugins/omoc-swarm.ts"
+EOF
+fi
+
+if [ -z "${SWARM_ID}" ]; then
+  SWARM_ID="omoc_$(date +%Y%m%d_%H%M%S)"
+fi
+
+if [ -z "${TMUX_SESSION}" ]; then
+  TMUX_SESSION="omoc-${SWARM_ID}"
+fi
+TMUX_SESSION="${TMUX_SESSION//[^a-zA-Z0-9_.-]/_}"
+
+if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
+  tmux attach -t "${TMUX_SESSION}"
+  exit 0
+fi
+
+if [ -z "${PORT}" ]; then
+  PORT="4096"
+fi
+
+while lsof -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; do
+  PORT="$((PORT + 1))"
+done
+
+SERVER_URL="http://127.0.0.1:${PORT}"
+
+tmux new-session -d -s "${TMUX_SESSION}" -n server "cd \"${PROJECT_ROOT}\" && ${OPENCODE_BIN} serve --port ${PORT} --print-logs"
+tmux set-option -t "${TMUX_SESSION}" pane-border-status top
+tmux set-option -t "${TMUX_SESSION}" pane-border-format "#T"
+tmux rename-window -t "${TMUX_SESSION}:server" "server:${PORT}"
+tmux select-pane -t "${TMUX_SESSION}:server.0" -T "opencode serve"
+
+for _ in $(seq 1 80); do
+  if curl -fsS "${SERVER_URL}/path?directory=${PROJECT_ROOT}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+
+root_json="$(curl -fsS -X POST "${SERVER_URL}/session?directory=${PROJECT_ROOT}" \
+  -H "Content-Type: application/json" \
+  -d "{\"title\":\"${SWARM_ID}:root\"}")"
+ROOT_SESSION_ID="$(printf "%s" "${root_json}" | jq -r .id)"
+
+create_child() {
+  local name="$1"
+  curl -fsS -X POST "${SERVER_URL}/session?directory=${PROJECT_ROOT}" \
+    -H "Content-Type: application/json" \
+    -d "{\"title\":\"${SWARM_ID}:${name}\",\"parentID\":\"${ROOT_SESSION_ID}\"}"
+}
+
+planner_id="$(create_child planner | jq -r .id)"
+researcher_id="$(create_child researcher | jq -r .id)"
+coder_id="$(create_child coder | jq -r .id)"
+reviewer_id="$(create_child reviewer | jq -r .id)"
+
+planner_pane="$(tmux new-window -P -F '#{pane_id}' -t "${TMUX_SESSION}" -n swarm "cd \"${PROJECT_ROOT}\" && ${OPENCODE_BIN} attach \"${SERVER_URL}\" --session \"${planner_id}\" --dir \"${PROJECT_ROOT}\"")"
+researcher_pane="$(tmux split-window -h -P -F '#{pane_id}' -t "${planner_pane}" "cd \"${PROJECT_ROOT}\" && ${OPENCODE_BIN} attach \"${SERVER_URL}\" --session \"${researcher_id}\" --dir \"${PROJECT_ROOT}\"")"
+coder_pane="$(tmux split-window -v -P -F '#{pane_id}' -t "${planner_pane}" "cd \"${PROJECT_ROOT}\" && ${OPENCODE_BIN} attach \"${SERVER_URL}\" --session \"${coder_id}\" --dir \"${PROJECT_ROOT}\"")"
+reviewer_pane="$(tmux split-window -v -P -F '#{pane_id}' -t "${researcher_pane}" "cd \"${PROJECT_ROOT}\" && ${OPENCODE_BIN} attach \"${SERVER_URL}\" --session \"${reviewer_id}\" --dir \"${PROJECT_ROOT}\"")"
+
+tmux select-layout -t "${TMUX_SESSION}:swarm" tiled
+
+tmux select-pane -t "${planner_pane}" -T "planner (plan)"
+tmux select-pane -t "${researcher_pane}" -T "researcher (explore)"
+tmux select-pane -t "${coder_pane}" -T "coder (build)"
+tmux select-pane -t "${reviewer_pane}" -T "reviewer (general)"
+
+tmux select-window -t "${TMUX_SESSION}:swarm"
+tmux attach -t "${TMUX_SESSION}"
