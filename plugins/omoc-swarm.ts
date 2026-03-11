@@ -1,6 +1,9 @@
 import type { Config } from "@opencode-ai/sdk";
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
+import type { BunShell } from "@opencode-ai/plugin/dist/shell";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 type SwarmMemberConfig = {
   name: string;
@@ -23,6 +26,79 @@ type SwarmState = {
 const swarms = new Map<string, SwarmState>();
 const swarmBySessionID = new Map<string, string>();
 let latestConfig: Config | undefined;
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, n));
+}
+
+async function shCmd(
+  $: BunShell,
+  cwd: string,
+  cmd: string,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const out = await $.cwd(cwd).nothrow()`bash -lc ${$.escape(cmd)}`;
+  return { exitCode: out.exitCode, stdout: out.text(), stderr: out.stderr.toString() };
+}
+
+async function ensureGitRepo($: BunShell, cwd: string): Promise<boolean> {
+  const res = await shCmd($, cwd, "git rev-parse --is-inside-work-tree");
+  return res.exitCode === 0 && res.stdout.trim() === "true";
+}
+
+function safeBranchComponent(input: string): string {
+  return input.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "x";
+}
+
+async function createGitWorktree(
+  $: BunShell,
+  repoDir: string,
+  worktreeDir: string,
+  branchName: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const add = await shCmd(
+    $,
+    repoDir,
+    `git worktree add -b ${$.escape(branchName)} ${$.escape(worktreeDir)} HEAD`,
+  );
+  if (add.exitCode !== 0) return { ok: false, error: add.stderr || add.stdout || "git worktree add failed" };
+  return { ok: true };
+}
+
+async function removeGitWorktree(
+  $: BunShell,
+  repoDir: string,
+  worktreeDir: string,
+  branchName: string,
+): Promise<void> {
+  await shCmd($, repoDir, `git worktree remove --force ${$.escape(worktreeDir)}`);
+  await shCmd($, repoDir, `git branch -D ${$.escape(branchName)}`);
+}
+
+async function getWorktreeDiff(
+  $: BunShell,
+  worktreeDir: string,
+): Promise<{ changedFiles: string[]; status: string; diff: string }> {
+  const status = await shCmd($, worktreeDir, "git status --porcelain");
+  const changedFiles = status.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => l.slice(3).trim())
+    .filter(Boolean);
+
+  const diff = await shCmd($, worktreeDir, "git diff");
+
+  return {
+    changedFiles,
+    status: status.stdout.trim(),
+    diff: diff.stdout,
+  };
+}
+
+function truncate(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n\n…(truncated ${text.length - maxChars} chars)…`;
+}
 
 function createSwarmId(): string {
   const time = Date.now().toString(36);
@@ -200,7 +276,7 @@ function findMemberNameBySession(swarm: SwarmState, sessionID: string): string |
   return undefined;
 }
 
-const OmocSwarmPlugin: Plugin = async ({ client }) => {
+const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
   const schema = tool.schema;
 
   const defaultMembers: SwarmMemberConfig[] = [
@@ -299,6 +375,223 @@ const OmocSwarmPlugin: Plugin = async ({ client }) => {
           const result = await resolveSwarm(client, args.id, context.sessionID, context.directory, context.worktree);
           if ("error" in result) return result.error;
           return formatSwarm(result.swarm);
+        },
+      }),
+
+      "swarm.max": tool({
+        description:
+          "Codebuff-like MAX mode: run multiple parallel editor tries in isolated git worktrees, then use a selector to pick and apply the best result.",
+        args: {
+          id: schema.string().min(1).optional().describe("Optional swarm id; defaults to current session's swarm"),
+          prompt: schema.string().min(1).describe("Task prompt to execute"),
+          tries: schema.number().min(2).max(5).optional().describe("Number of parallel editor tries (default 3)"),
+          testCmd: schema.string().min(1).optional().describe("Optional test command to run inside each worktree"),
+          apply: schema.boolean().optional().describe("Apply the selected winner patch onto the main worktree (default true)"),
+          cleanup: schema.boolean().optional().describe("Cleanup worktrees/branches after completion (default false)"),
+          selector: schema
+            .string()
+            .min(1)
+            .optional()
+            .describe("Swarm member to act as selector (default 'reviewer', fallback: 'general')"),
+        },
+        async execute(args, context) {
+          const resolved = await resolveSwarm(client, args.id, context.sessionID, context.directory, context.worktree);
+          if ("error" in resolved) return resolved.error;
+          const swarm = resolved.swarm;
+
+          if (!(await ensureGitRepo($, context.directory))) {
+            return "Error: swarm.max requires a git repository (git rev-parse failed).";
+          }
+
+          const selectorName = normalizeMemberName(args.selector || "reviewer");
+          const selectorMember =
+            swarm.members[selectorName] || swarm.members["reviewer"] || swarm.members["planner"] || swarm.members["coder"];
+          if (!selectorMember) return "Error: swarm.max requires a selector member (recommend adding 'reviewer' to the swarm).";
+
+          const tries = clamp(Math.floor(args.tries ?? 3), 2, 5);
+          const applyWinner = args.apply ?? true;
+          const cleanup = args.cleanup ?? false;
+          const runId = safeBranchComponent(new Date().toISOString().replace(/[:.]/g, "-"));
+          const worktreeBase = join(context.directory, ".omoc-worktrees", swarm.id, runId);
+          await mkdir(worktreeBase, { recursive: true });
+
+          const tryNames = Array.from({ length: tries }, (_, i) => String.fromCharCode("a".charCodeAt(0) + i));
+          const strategyByTry: Record<string, string> = {
+            a: "Strategy A: minimal, surgical change; prioritize correctness and passing existing behaviors.",
+            b: "Strategy B: robust edge cases + add/adjust tests where appropriate; prioritize correctness under variation.",
+            c: "Strategy C: clean refactor if needed; prioritize maintainability and clear structure (avoid scope creep).",
+            d: "Strategy D: performance/latency focus; avoid unnecessary refactors.",
+            e: "Strategy E: documentation/UX polish (only if relevant to the task).",
+          };
+
+          const createdWorktrees: Array<{ name: string; dir: string; branch: string }> = [];
+
+          try {
+            for (const name of tryNames) {
+              const branch = `omoc/${safeBranchComponent(swarm.id)}/${runId}/${name}`;
+              const dir = join(worktreeBase, `try_${name}`);
+              const created = await createGitWorktree($, context.directory, dir, branch);
+              if (!created.ok) throw new Error(`worktree ${name}: ${created.error}`);
+              createdWorktrees.push({ name, dir, branch });
+            }
+
+            const tryRuns = await Promise.all(
+              createdWorktrees.map(async (wt) => {
+                const title = `${swarm.id}:max_${wt.name}`;
+                const session = await must<{ id: string }>(
+                  `create max session ${wt.name}`,
+                  client.session.create({
+                    query: { directory: wt.dir },
+                    body: { parentID: context.sessionID, title },
+                  }),
+                );
+
+                const editorPrompt = [
+                  `You are MAX-TRY '${wt.name}' in swarm '${swarm.id}'.`,
+                  strategyByTry[wt.name] || "Strategy: do your best.",
+                  "",
+                  "Make the changes in THIS worktree only. Keep scope tight. Leave the worktree in a clean state.",
+                  "",
+                  args.prompt,
+                ].join("\n");
+
+                const response = await must<{ parts: Array<any> }>(
+                  `prompt max try ${wt.name}`,
+                  client.session.prompt({
+                    query: { directory: wt.dir },
+                    path: { id: session.id },
+                    body: { agent: "build", parts: [{ type: "text", text: editorPrompt }] },
+                  }),
+                );
+
+                const diffInfo = await getWorktreeDiff($, wt.dir);
+
+                let test: { cmd?: string; exitCode?: number; output?: string } | undefined;
+                if (args.testCmd) {
+                  const t = await shCmd($, wt.dir, args.testCmd);
+                  test = {
+                    cmd: args.testCmd,
+                    exitCode: t.exitCode,
+                    output: truncate([t.stdout, t.stderr].filter(Boolean).join("\n"), 8000),
+                  };
+                }
+
+                return {
+                  name: wt.name,
+                  worktreeDir: wt.dir,
+                  branch: wt.branch,
+                  sessionID: session.id,
+                  agentOutput: extractText(response.parts) || "(no text output)",
+                  changedFiles: diffInfo.changedFiles,
+                  status: diffInfo.status,
+                  diff: diffInfo.diff,
+                  test,
+                };
+              }),
+            );
+
+            const selectorPayload = [
+              `You are the SELECTOR for MAX mode in swarm '${swarm.id}'.`,
+              `Pick the best candidate to apply to the main worktree.`,
+              `Prefer: correctness for the prompt, minimal risk, tests passing (if provided), and clean diff.`,
+              `Return STRICT JSON ONLY: {"winner":"a|b|c|d|e","reason":"...","notes":"..."} (winner must be one of the tries).`,
+              "",
+              ...tryRuns.map((r) => {
+                const testLine = r.test ? `test exit=${r.test.exitCode}` : "test: (not run)";
+                const filesLine = r.changedFiles.length ? r.changedFiles.join(", ") : "(no changed files)";
+                return [
+                  `--- TRY ${r.name} ---`,
+                  `changed: ${filesLine}`,
+                  `status:`,
+                  r.status || "(clean)",
+                  testLine,
+                  "",
+                  "diff (truncated):",
+                  truncate(r.diff || "", 12000) || "(no diff)",
+                ].join("\n");
+              }),
+            ].join("\n");
+
+            const selectorResponse = await must<{ parts: Array<any> }>(
+              `selector ${selectorMember.name}`,
+              client.session.prompt({
+                query: { directory: swarm.directory },
+                path: { id: selectorMember.sessionID },
+                body: { agent: selectorMember.agent, parts: [{ type: "text", text: selectorPayload }] },
+              }),
+            );
+
+            const selectorText = extractText(selectorResponse.parts) || "";
+            let winner: string | undefined;
+            let selectorReason = selectorText.trim();
+            try {
+              const parsed = JSON.parse(selectorText);
+              if (parsed && typeof parsed.winner === "string") winner = normalizeMemberName(parsed.winner);
+              if (parsed && typeof parsed.reason === "string") selectorReason = parsed.reason;
+            } catch {
+              const m =
+                selectorText.match(/\"winner\"\s*:\s*\"([a-e])\"/i) ||
+                selectorText.match(/\bwinner\s*[:=]\s*([a-e])\b/i);
+              if (m) winner = normalizeMemberName(m[1]);
+            }
+
+            if (!winner || !tryNames.includes(winner)) {
+              return `Error: selector did not return a valid winner. Output:\n\n${selectorText}`;
+            }
+
+            const winning = tryRuns.find((r) => r.name === winner)!;
+            let applyNote = "not applied";
+
+            if (applyWinner) {
+              const patch = winning.diff || "";
+              if (!patch.trim()) {
+                applyNote = "winner had no diff; nothing to apply";
+              } else {
+                const patchFile = join(worktreeBase, `winner_${winner}.patch`);
+                await writeFile(patchFile, patch, "utf8");
+                const applied = await shCmd($, context.directory, `git apply --whitespace=nowarn ${$.escape(patchFile)}`);
+                if (applied.exitCode !== 0) {
+                  return [
+                    `Error: failed to apply winner patch (try ${winner}).`,
+                    `selector reason: ${selectorReason}`,
+                    "",
+                    "git apply stderr:",
+                    applied.stderr || "(none)",
+                  ].join("\n");
+                }
+                applyNote = "applied to main worktree via git apply";
+              }
+            }
+
+            const report = [
+              "MAX mode complete.",
+              `winner: ${winner} (${applyNote})`,
+              `selector reason: ${selectorReason}`,
+              "",
+              ...tryRuns.map((r) => {
+                const testLine = r.test ? `test exit=${r.test.exitCode}` : "test: (not run)";
+                const filesLine = r.changedFiles.length ? r.changedFiles.join(", ") : "(no changed files)";
+                return `- try ${r.name}: ${filesLine} | ${testLine}`;
+              }),
+            ].join("\n");
+
+            return report;
+          } finally {
+            if (cleanup) {
+              for (const wt of createdWorktrees) {
+                try {
+                  await removeGitWorktree($, context.directory, wt.dir, wt.branch);
+                } catch {
+                  // ignore cleanup errors
+                }
+              }
+              try {
+                await rm(worktreeBase, { recursive: true, force: true });
+              } catch {
+                // ignore
+              }
+            }
+          }
         },
       }),
 
