@@ -1,5 +1,12 @@
 # opencode-omoc-swarm
 
+⚡ **Powered by [OpenSIN](https://opensin.ai) – The Autonomous AI Coding Fleet** ⚡
+
+> Discover the ultimate A2A (Agent-to-Agent) ecosystem, enterprise-grade repository governance, and our 100% autonomous AI workforce at **[opensin.ai](https://opensin.ai)**. This plugin is part of the OpenSIN tooling family.
+
+---
+
+
 > 🚀 **Powered by [OpenSIN](https://opensin.ai)** - The Next-Generation Autonomous AI Ecosystem.
 > Discover the ultimate A2A fleet, elite agent hosting, and enterprise-grade automation solutions at **[opensin.ai](https://opensin.ai)**!
 
