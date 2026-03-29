@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun run ci
+
+  live-e2e:
+    runs-on: ubuntu-latest
+    name: Live E2E (OpenCode Runtime)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install opencode CLI
+        run: npm install -g @anthropic-ai/opencode
+
+      - name: Run live E2E tests
+        run: |
+          bun install
+          bash scripts/oc-swarm-e2e.test.sh
+        env:
+          CI: "true"

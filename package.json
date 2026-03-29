@@ -1,0 +1,32 @@
+{
+  "name": "opencode-omoc-swarm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.8",
+  "bin": {
+    "oc-swarm": "./bin/oc-swarm"
+  },
+  "files": [
+    "bin",
+    "plugins",
+    "templates",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.3"
+  },
+  "scripts": {
+    "test": "bun run plugins/registry.test.ts && bun run plugins/registry-roundtrip.test.ts && bun run plugins/migration.test.ts && bash scripts/oc-swarm-smoke.test.sh",
+    "test:e2e": "bash scripts/oc-swarm-e2e.test.sh",
+    "observe": "bun run scripts/swarm-observe.ts",
+    "memory": "bun run scripts/swarm-memory.ts",
+    "eval": "bun run scripts/eval-routing.ts",
+    "typecheck": "tsc --noEmit",
+    "check:readme": "node scripts/check-readme.mjs",
+    "check:shell": "bash -n bin/oc-swarm && bash -n templates/bin/opencode",
+    "ci": "bun run typecheck && bun run test && bun run eval && bun run check:readme && bun run check:shell",
+    "ci:with-e2e": "bun run ci && bun run test:e2e"
+  }
+}
