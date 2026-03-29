@@ -7,8 +7,15 @@ import type { Config } from "@opencode-ai/sdk";
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { BunShell } from "@opencode-ai/plugin/dist/shell";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, rm, writeFile, readFile, readdir } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import {
+  resolveAgentId,
+  createRegistryEntry,
+  validateRegistry,
+  getUnknownAgentDiagnostic,
+  isValidAgentId,
+} from "./registry";
 
 type SwarmMemberConfig = {
   name: string;
@@ -17,6 +24,8 @@ type SwarmMemberConfig = {
 
 type SwarmMember = SwarmMemberConfig & {
   sessionID: string;
+  resolvedAgent?: string;
+  agentError?: string;
 };
 
 type SwarmState = {
@@ -26,6 +35,7 @@ type SwarmState = {
   createdAt: number;
   createdBySessionID: string;
   members: Record<string, SwarmMember>;
+  registryPersisted?: boolean;
 };
 
 const swarms = new Map<string, SwarmState>();
@@ -115,13 +125,103 @@ function normalizeMemberName(name: string): string {
   return name.trim().toLowerCase();
 }
 
-function defaultAgentForMemberName(memberName: string): string {
-  const key = normalizeMemberName(memberName);
-  if (key === "planner") return "plan";
-  if (key === "researcher") return "explore";
-  if (key === "coder") return "build";
-  if (key === "reviewer") return "general";
-  return "general";
+/**
+ * Registry path for persisting swarm member identities
+ */
+const REGISTRY_FILENAME = '.omoc-registry.json';
+
+/**
+ * Resolves agent ID with registry-backed validation.
+ * Falls back to legacy role mapping for backward compatibility.
+ * Returns structured error for unknown agents.
+ */
+function resolveAgentForMemberName(
+  memberName: string,
+  requestedAgent: string
+): { agentId: string; error?: string } {
+  const normalized = normalizeMemberName(memberName);
+  
+  // Try to resolve the requested agent
+  const resolved = resolveAgentId(requestedAgent);
+  
+  if (resolved) {
+    return { agentId: resolved };
+  }
+  
+  // Legacy fallback for backward compatibility
+  const legacyMapping = resolveAgentId(normalized);
+  if (legacyMapping && normalized !== requestedAgent.toLowerCase()) {
+    return { agentId: legacyMapping };
+  }
+  
+  // Unknown agent - return diagnostic
+  const validAgents = Array.from(new Set([
+    'plan', 'build', 'explore', 'general',
+    'oracle', 'metis', 'momus', 'librarian'
+  ])).sort();
+  
+  return {
+    agentId: 'general',
+    error: getUnknownAgentDiagnostic(requestedAgent, validAgents)
+  };
+}
+
+/**
+ * Gets the registry file path for a swarm
+ */
+function getRegistryPath(directory: string): string {
+  return join(directory, REGISTRY_FILENAME);
+}
+
+/**
+ * Loads swarm registry from disk
+ */
+async function loadRegistry(directory: string, swarmId: string): Promise<Record<string, SwarmMemberConfig> | null> {
+  try {
+    const registryPath = getRegistryPath(directory);
+    const content = await readFile(registryPath, 'utf-8');
+    const data = JSON.parse(content);
+    
+    if (!validateRegistry(data) || data.swarmId !== swarmId) {
+      return null;
+    }
+    
+    const members: Record<string, SwarmMemberConfig> = {};
+    for (const [key, entry] of Object.entries(data.members)) {
+      members[key] = {
+        name: entry.memberName,
+        agent: entry.agentId,
+      };
+    }
+    return members;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Saves swarm registry to disk
+ */
+async function saveRegistry(
+  directory: string,
+  swarmId: string,
+  members: Record<string, SwarmMember>
+): Promise<void> {
+  const registryPath = getRegistryPath(directory);
+  
+  const registry = {
+    version: 1,
+    swarmId,
+    createdAt: Date.now(),
+    members: Object.values(members).map(m => ({
+      schemaVersion: 1,
+      memberName: m.name,
+      agentId: m.resolvedAgent || m.agent,
+      createdAt: Date.now(),
+    })),
+  };
+  
+  await writeFile(registryPath, JSON.stringify(registry, null, 2), 'utf-8');
 }
 
 function formatSwarm(swarm: SwarmState): string {
@@ -226,13 +326,21 @@ async function discoverSwarmForSession(
       const parsed = parseSwarmTitle(child.title || "");
       if (!parsed.memberName) continue;
       if (parsed.swarmId && parsed.swarmId !== swarmId) continue;
-      const normalized = normalizeMemberName(parsed.memberName);
-      if (!normalized) continue;
-      members[normalized] = {
-        name: normalized,
-        agent: defaultAgentForMemberName(normalized),
-        sessionID: child.id,
-      };
+    const normalized = normalizeMemberName(parsed.memberName);
+    if (!normalized) continue;
+    
+    // Use legacy role mapping for backward compatibility
+    const legacyAgent = normalized === 'planner' ? 'plan'
+      : normalized === 'researcher' ? 'explore'
+      : normalized === 'coder' ? 'build'
+      : normalized === 'reviewer' ? 'general'
+      : 'general';
+    
+    members[normalized] = {
+      name: normalized,
+      agent: legacyAgent,
+      sessionID: child.id,
+    };
     }
 
     const swarm: SwarmState = {
@@ -351,23 +459,48 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
           // Allow omitting swarmId on later calls from the "root" session.
           swarmBySessionID.set(context.sessionID, swarmId);
 
-          for (const member of memberConfigs) {
-            const titlePrefix = args.title?.trim() || swarmId;
-            const session = await must<{ id: string }>(`create session for ${member.name}`, client.session.create({
-              query: { directory: context.directory },
-              body: {
-                parentID: context.sessionID,
-                title: `${titlePrefix}:${member.name}`,
-              },
-            }));
+  for (const member of memberConfigs) {
+    // Resolve agent with registry-backed validation
+    const resolution = resolveAgentForMemberName(member.name, member.agent);
+    
+    const titlePrefix = args.title?.trim() || swarmId;
+    const session = await must<{ id: string }>(`create session for ${member.name}`, client.session.create({
+      query: { directory: context.directory },
+      body: {
+        parentID: context.sessionID,
+        title: `${titlePrefix}:${member.name}`,
+      },
+    }));
 
-            swarm.members[member.name] = { ...member, sessionID: session.id };
-            swarmBySessionID.set(session.id, swarmId);
-          }
+    swarm.members[member.name] = { 
+      ...member, 
+      sessionID: session.id,
+      resolvedAgent: resolution.agentId,
+      agentError: resolution.error,
+    };
+    swarmBySessionID.set(session.id, swarmId);
+  }
 
-          swarms.set(swarmId, swarm);
+  // Persist registry to disk
+  try {
+    await saveRegistry(context.directory, swarmId, swarm.members);
+    swarm.registryPersisted = true;
+  } catch (error) {
+    // Non-fatal, but log warning
+    console.warn('Warning: Failed to persist swarm registry:', error);
+  }
 
-          return formatSwarm(swarm);
+  swarms.set(swarmId, swarm);
+
+  // Build return message with agent resolution info
+  const agentWarnings = Object.values(swarm.members)
+    .filter(m => m.agentError)
+    .map(m => `  - ${m.name}: ${m.agentError}`);
+  
+  const baseMessage = formatSwarm(swarm);
+  return agentWarnings.length > 0 
+    ? `${baseMessage}\n\n⚠️ Agent Resolution Warnings:\n${agentWarnings.join('\n')}`
+    : baseMessage;
         },
       }),
 
