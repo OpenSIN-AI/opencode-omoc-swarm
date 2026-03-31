@@ -330,7 +330,7 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
       latestConfig = cfg;
     },
     tool: {
-      "swarm.discover": tool({
+      "swarm_discover": tool({
         description:
           "Discover and register a swarm from existing session titles (expects titles like '<swarmId>:<memberName>' under the same parent).",
         args: {
@@ -349,9 +349,9 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
         },
       }),
 
-      "swarm.create": tool({
+      "swarm_create": tool({
         description:
-          "Create a multi-agent swarm (separate sessions) that can run in parallel and message each other via swarm.send.",
+          "Create a multi-agent swarm (separate sessions) that can run in parallel and message each other via swarm_send.",
         args: {
           id: schema.string().min(1).optional().describe("Optional swarm id"),
           title: schema.string().min(1).optional().describe("Optional session title prefix"),
@@ -424,7 +424,7 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
         },
       }),
 
-      "swarm.status": tool({
+      "swarm_status": tool({
         description: "Show swarm status (members, sessions).",
         args: {
           id: schema.string().min(1).optional().describe("Optional swarm id; defaults to current session's swarm"),
@@ -442,7 +442,7 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
         },
       }),
 
-      "swarm.max": tool({
+      "swarm_max": tool({
         description:
           "Codebuff-like MAX mode: run multiple parallel editor tries in isolated git worktrees, then use a selector to pick and apply the best result.",
         args: {
@@ -696,7 +696,7 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
         },
       }),
 
-      "swarm.parallel": tool({
+      "swarm_parallel": tool({
         description:
           "Run the same prompt across multiple swarm members in parallel (with model-collision gating). Returns a combined report.",
         args: {
@@ -740,7 +740,7 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
                 for (const member of group) {
                   const memberPrompt = [
                     `You are '${member.name}' (agent '${member.agent}') in swarm '${swarm.id}'.`,
-                    `If you need to coordinate, use tool swarm.send.`,
+                    `If you need to coordinate, use tool swarm_send.`,
                     "",
                     args.prompt,
                   ].join("\n");
@@ -790,7 +790,7 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
         },
       }),
 
-      "swarm.jam": tool({
+      "swarm_jam": tool({
         description:
           "Collaborative swarm run in the SAME worktree: sends a coordination prompt to multiple members so they can work together (may touch the same files).",
         args: {
@@ -836,7 +836,7 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
                   const memberPrompt = [
                     `You are '${member.name}' (agent '${member.agent}') collaborating in swarm '${swarm.id}'.`,
                     `You share the SAME worktree with other members (no isolation).`,
-                    `Coordinate via tool swarm.send before making overlapping edits.`,
+                    `Coordinate via tool swarm_send before making overlapping edits.`,
                     "",
                     `First message requirement: state which files you plan to touch.`,
                     "",
@@ -883,7 +883,7 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
         },
       }),
 
-      "swarm.send": tool({
+      "swarm_send": tool({
         description:
           "Send a message to another swarm member (routes as a prompt into their session). Optionally waits for their reply.",
         args: {
@@ -911,7 +911,7 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
             "",
             args.message,
             "",
-            awaitReply ? `Reply back with swarm.send(to='${fromName}', message=...) if needed.` : "",
+            awaitReply ? `Reply back with swarm_send(to='${fromName}', message=...) if needed.` : "",
           ]
             .filter(Boolean)
             .join("\n");
@@ -941,7 +941,7 @@ const OmocSwarmPlugin: Plugin = async ({ client, $ }) => {
         },
       }),
 
-      "swarm.forget": tool({
+      "swarm_forget": tool({
         description: "Forget swarm state in this process (does not delete sessions).",
         args: {
           id: schema.string().min(1).optional().describe("Optional swarm id; defaults to current session's swarm"),
