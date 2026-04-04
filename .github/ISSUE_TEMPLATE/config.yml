@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💬 OpenSIN Community
+    url: https://github.com/OpenSIN-AI
+    about: Get help, ask questions, and chat with other OpenSIN users
+  - name: 📖 Documentation
+    url: https://github.com/OpenSIN-AI/OpenSIN-documentation
+    about: Read the official documentation and guides
+  - name: 🎓 Getting Started
+    url: https://github.com/OpenSIN-AI/OpenSIN-documentation/blob/main/docs/guide/getting-started.md
+    about: New to OpenSIN? Start here
