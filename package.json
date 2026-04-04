@@ -28,5 +28,6 @@
     "check:shell": "bash -n bin/oc-swarm && bash -n templates/bin/opencode",
     "ci": "bun run typecheck && bun run test && bun run eval && bun run check:readme && bun run check:shell",
     "ci:with-e2e": "bun run ci && bun run test:e2e"
-  }
+  },
+  "license": "Apache-2.0"
 }
