@@ -1,0 +1,60 @@
+name: 📚 Documentation Issue
+description: Report missing, unclear, or incorrect documentation
+title: "[DOCS] "
+labels:
+  - documentation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help us improve our documentation! Good documentation is crucial for a great developer experience.
+        
+  - type: dropdown
+    id: doc_type
+    attributes:
+      label: Documentation Type
+      options:
+        - Missing documentation (feature not documented)
+        - Unclear/confusing documentation
+        - Incorrect/outdated documentation
+        - Typo or formatting issue
+        - Missing code examples
+        - Broken links
+        - Other
+    validations:
+      required: true
+      
+  - type: input
+    id: location
+    attributes:
+      label: Documentation Location
+      description: Where did you encounter this issue? Provide a URL if possible
+    validations:
+      required: false
+      
+  - type: textarea
+    id: issue
+    attributes:
+      label: What's Wrong or Missing?
+      description: Explain what's incorrect, unclear, or missing
+    validations:
+      required: true
+      
+  - type: textarea
+    id: suggested
+    attributes:
+      label: Suggested Improvement
+      description: How should the documentation be improved?
+    validations:
+      required: true
+      
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - High - Prevents users from using a feature
+        - Medium - Makes feature difficult to understand
+        - Low - Minor confusion
+    validations:
+      required: true
