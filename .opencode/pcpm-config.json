@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "beforeRun": "/Users/jeremy/dev/opencode-omoc-swarm/.opencode/hooks/pcpm-before-run.sh",
+    "afterRun": "/Users/jeremy/dev/opencode-omoc-swarm/.opencode/hooks/pcpm-after-run.sh",
+    "onFailure": "/Users/jeremy/dev/opencode-omoc-swarm/.opencode/hooks/pcpm-after-run.sh"
+  },
+  "pcpm": {
+    "brainRepoPath": "/Users/jeremy/dev/opencode-omoc-swarm",
+    "projectId": "opencode-omoc-swarm",
+    "goalId": "default-goal",
+    "goalDescription": "Continue development",
+    "autoSync": true,
+    "extractKnowledge": true
+  },
+  "memory": {
+    "provider": "global-brain",
+    "requirePlan": true,
+    "requireActiveContext": true,
+    "requireForbidden": true
+  },
+  "cli": {
+    "command": "opencode",
+    "flags": [
+      "--format",
+      "json",
+      "--non-interactive"
+    ]
+  }
+}
